@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>同期リスニング</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --fg: #1d1d1f; --sub: #6b6b70; --card: #ffffff;
+    --line: #e2e2e0; --accent: #5865f2; --accent-fg: #fff; --hl: #eef0ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #17171a; --fg: #ececf0; --sub: #9a9aa3; --card: #222226;
+      --line: #34343a; --accent: #7983f5; --accent-fg: #fff; --hl: #2c2f4a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; line-height: 1.6; }
+  main { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.4rem; margin: 0 0 16px; }
+  h2 { font-size: 1rem; margin: 0 0 8px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  button { font: inherit; border: 0; border-radius: 8px; padding: 10px 16px; cursor: pointer;
+    background: var(--accent); color: var(--accent-fg); }
+  button.ghost { background: transparent; color: var(--fg); border: 1px solid var(--line); }
+  button:disabled { opacity: .45; cursor: default; }
+  input[type=text], textarea { width: 100%; font: inherit; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+  textarea { min-height: 120px; font-family: ui-monospace, Menlo, monospace; font-size: .85rem; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > input { flex: 1; }
+  .sub { color: var(--sub); font-size: .85rem; }
+  ol.tracks { list-style: none; padding: 0; margin: 8px 0 0; }
+  ol.tracks li { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); margin-bottom: 6px;
+    display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+  ol.tracks li.current { background: var(--hl); border-color: var(--accent); }
+  ol.tracks li.clickable { cursor: pointer; }
+  audio { width: 100%; margin-top: 12px; }
+  .big { font-size: 1.6rem; font-variant-numeric: tabular-nums; }
+  #status { min-height: 1.6em; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>同期リスニング</h1>
+  <p id="status" class="sub"></p>
+
+  <!-- 開始画面 -->
+  <section id="startView" hidden>
+    <div class="card">
+      <h2>ホスト</h2>
+      <p class="sub">部屋を作って音源を流します。再生・停止・シークはホストだけが操作できます。</p>
+      <button id="createBtn">部屋を作る</button>
+    </div>
+    <div class="card">
+      <h2>参加</h2>
+      <div class="row">
+        <input id="joinCode" type="text" placeholder="部屋コード">
+        <button id="joinBtn">参加</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ホスト画面 -->
+  <section id="hostView" hidden>
+    <div class="card">
+      <h2>参加用リンク</h2>
+      <div class="row">
+        <input id="shareLink" type="text" readonly>
+        <button id="copyBtn" class="ghost">コピー</button>
+      </div>
+      <p class="sub">参加者: <span id="peerCount">0</span>人　／　このタブは開いたままにしてください</p>
+    </div>
+    <div class="card">
+      <h2>プレイリスト</h2>
+      <p class="sub">1行に1曲。「曲名 | URL」の形式でも書けます。GoogleドライブのリンクはURLをそのまま貼ればOKです。</p>
+      <textarea id="playlistInput" placeholder="01 Opening | https://drive.google.com/file/d/xxxx/view?usp=sharing"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button id="applyBtn">反映</button>
+        <span class="sub">曲名をタップするとその曲に切り替わります</span>
+      </div>
+      <ol id="hostTracks" class="tracks"></ol>
+      <audio id="hostAudio" controls preload="auto"></audio>
+    </div>
+  </section>
+
+  <!-- 参加者画面 -->
+  <section id="guestView" hidden>
+    <div class="card">
+      <p id="guestTitle" style="margin:0 0 4px;font-weight:600">—</p>
+      <p class="big" id="guestTime" style="margin:0">0:00 / 0:00</p>
+      <p class="sub" id="guestDrift" style="margin:0 0 12px">ズレ: —</p>
+      <button id="unlockBtn" disabled>聴き始める</button>
+      <div class="row" style="margin-top:12px">
+        <span class="sub">音量</span>
+        <input id="volume" type="range" min="0" max="1" step="0.01" value="1" style="flex:1">
+      </div>
+      <p class="sub">iPhone/iPadは本体の音量ボタンで調整してください。</p>
+    </div>
+    <div class="card">
+      <h2>プレイリスト</h2>
+      <ol id="guestTracks" class="tracks"></ol>
+    </div>
+    <audio id="guestAudio" preload="auto"></audio>
+  </section>
+</main>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+(() => {
+  const PREFIX = 'sync-listen-v1-';
+  const SEEK_THRESHOLD = 0.2;   // これ以上ずれたら再シーク(秒)
+  const $ = id => document.getElementById(id);
+  const params = new URLSearchParams(location.search);
+
+  function setStatus(msg) { $('status').textContent = msg; }
+  function show(id) {
+    for (const v of ['startView', 'hostView', 'guestView']) $(v).hidden = v !== id;
+  }
+  function fmt(t) {
+    if (!isFinite(t) || t < 0) t = 0;
+    const m = Math.floor(t / 60), s = Math.floor(t % 60);
+    return m + ':' + String(s).padStart(2, '0');
+  }
+  function randomRoom() {
+    const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
+    let r = '';
+    for (let i = 0; i < 6; i++) r += chars[Math.floor(Math.random() * chars.length)];
+    return r;
+  }
+  function cleanRoom(s) { return (s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+
+  // Googleドライブの共有リンクを直接再生できるURLに変換
+  function toDirect(url) {
+    url = url.trim();
+    if (/google\.com/.test(url)) {
+      const m = url.match(/\/file\/d\/([\w-]+)/) || url.match(/[?&]id=([\w-]+)/);
+      if (m) return 'https://drive.google.com/uc?export=download&id=' + m[1];
+    }
+    return url;
+  }
+  function parsePlaylist(text) {
+    return text.split('\n').map(l => l.trim()).filter(Boolean).map((line, i) => {
+      const p = line.split('|');
+      if (p.length >= 2) return { title: p[0].trim() || ('Track ' + (i + 1)), url: toDirect(p.slice(1).join('|')) };
+      return { title: 'Track ' + (i + 1), url: toDirect(line) };
+    });
+  }
+  function renderTracks(el, tracks, index, onClick) {
+    el.innerHTML = '';
+    tracks.forEach((t, i) => {
+      const li = document.createElement('li');
+      li.textContent = (i + 1) + '. ' + t.title;
+      if (i === index) li.classList.add('current');
+      if (onClick) { li.classList.add('clickable'); li.onclick = () => onClick(i); }
+      el.appendChild(li);
+    });
+  }
+  const audioErrorMsg = '音源を読み込めません。ドライブの共有設定（リンクを知っている全員）と、ファイルサイズ（約100MB超は不可）を確認してください。';
+
+  // ================= ホスト =================
+  function startHost(room) {
+    history.replaceState(null, '', '?host=' + room);
+    show('hostView');
+    const audio = $('hostAudio');
+    const conns = new Set();
+    let tracks = [], index = -1, peer = null;
+
+    $('shareLink').value = location.origin + location.pathname + '?room=' + room;
+    $('copyBtn').onclick = async () => {
+      try { await navigator.clipboard.writeText($('shareLink').value); $('copyBtn').textContent = 'コピー済み'; }
+      catch { $('shareLink').select(); }
+      setTimeout(() => $('copyBtn').textContent = 'コピー', 1500);
+    };
+
+    try { $('playlistInput').value = localStorage.getItem('sync-listen-playlist') || ''; } catch {}
+
+    function snapshot() {
+      return {
+        tracks, index,
+        playing: !audio.paused && !audio.ended && audio.readyState >= 3,
+        pos: audio.currentTime || 0,
+        at: Date.now()
+      };
+    }
+    function broadcast() {
+      const msg = { type: 'state', state: snapshot() };
+      for (const c of conns) if (c.open) c.send(msg);
+    }
+    function updateCount() { $('peerCount').textContent = conns.size; }
+    function selectTrack(i, autoplay) {
+      if (i < 0 || i >= tracks.length) return;
+      index = i;
+      audio.src = tracks[i].url;
+      renderTracks($('hostTracks'), tracks, index, j => selectTrack(j, true));
+      broadcast();
+      if (autoplay) audio.play().catch(() => {});
+    }
+
+    $('applyBtn').onclick = () => {
+      const text = $('playlistInput').value;
+      try { localStorage.setItem('sync-listen-playlist', text); } catch {}
+      const prevUrl = index >= 0 ? tracks[index].url : null;
+      tracks = parsePlaylist(text);
+      const keep = tracks.findIndex(t => t.url === prevUrl);
+      if (keep >= 0) { index = keep; renderTracks($('hostTracks'), tracks, index, j => selectTrack(j, true)); broadcast(); }
+      else if (tracks.length) selectTrack(0, false);
+      else { index = -1; audio.removeAttribute('src'); renderTracks($('hostTracks'), tracks, index); broadcast(); }
+    };
+
+    for (const ev of ['play', 'pause', 'playing', 'waiting', 'seeked', 'loadedmetadata', 'ratechange'])
+      audio.addEventListener(ev, broadcast);
+    audio.addEventListener('ended', () => {
+      broadcast();
+      if (index + 1 < tracks.length) selectTrack(index + 1, true);
+    });
+    audio.addEventListener('error', () => { if (audio.getAttribute('src')) setStatus(audioErrorMsg); });
+    setInterval(broadcast, 2000);
+
+    function createPeer() {
+      setStatus('部屋を準備中…');
+      peer = new Peer(PREFIX + room);
+      peer.on('open', () => setStatus('部屋を開きました（コード: ' + room + '）'));
+      peer.on('connection', conn => {
+        conn.on('open', () => { conns.add(conn); updateCount(); conn.send({ type: 'state', state: snapshot() }); });
+        conn.on('data', d => { if (d && d.type === 'ping') conn.send({ type: 'pong', t0: d.t0, h: Date.now() }); });
+        const drop = () => { conns.delete(conn); updateCount(); };
+        conn.on('close', drop);
+        conn.on('error', drop);
+      });
+      peer.on('disconnected', () => { setStatus('シグナリングサーバーから切断。再接続中…'); try { peer.reconnect(); } catch {} });
+      peer.on('error', e => {
+        if (e.type === 'unavailable-id') {
+          setStatus('部屋コードがまだ使用中です。数秒後に再試行します…');
+          peer.destroy();
+          setTimeout(createPeer, 4000);
+        } else {
+          setStatus('接続エラー: ' + e.type);
+        }
+      });
+    }
+    createPeer();
+  }
+
+  // ================= 参加者 =================
+  function startGuest(room) {
+    history.replaceState(null, '', '?room=' + room);
+    show('guestView');
+    const audio = $('guestAudio');
+    let peer = null, conn = null, hostState = null, loadedUrl = null;
+    let offset = 0, samples = [], unlocked = false;
+    let lead = 0.1, lastSeek = 0, pendingCheck = false;
+    let retryTimer = null;
+
+    $('volume').oninput = e => { audio.volume = +e.target.value; };
+
+    function scheduleRetry(msg) {
+      setStatus(msg);
+      if (retryTimer) return;
+      retryTimer = setTimeout(() => { retryTimer = null; connect(); }, 3000);
+    }
+    function connect() {
+      if (!peer || peer.destroyed) return;
+      if (peer.disconnected) { try { peer.reconnect(); } catch {} }
+      setStatus('ホストに接続中…');
+      conn = peer.connect(PREFIX + room, { reliable: true });
+      conn.on('open', () => { setStatus('接続しました'); syncClock(); });
+      conn.on('data', onData);
+      conn.on('close', () => scheduleRetry('ホストとの接続が切れました。再接続中…'));
+      conn.on('error', () => scheduleRetry('接続エラー。再接続中…'));
+    }
+    function syncClock() {
+      samples = [];
+      for (let i = 0; i < 8; i++)
+        setTimeout(() => { if (conn && conn.open) conn.send({ type: 'ping', t0: Date.now() }); }, i * 150);
+    }
+    setInterval(() => { if (conn && conn.open) syncClock(); }, 30000);
+
+    function onData(d) {
+      if (!d) return;
+      if (d.type === 'pong') {
+        const rtt = Date.now() - d.t0;
+        samples.push({ rtt, off: d.h - (d.t0 + rtt / 2) });
+        samples.sort((a, b) => a.rtt - b.rtt);
+        offset = samples[0].off;     // 往復時間が最小のサンプルを採用
+      } else if (d.type === 'state') {
+        hostState = d.state;
+        const t = hostState.tracks[hostState.index];
+        const url = t ? t.url : null;
+        if (url !== loadedUrl) {
+          loadedUrl = url;
+          if (url) { audio.src = url; audio.load(); } else { audio.pause(); audio.removeAttribute('src'); }
+          pendingCheck = false;
+        }
+        $('guestTitle').textContent = t ? t.title : '（ホストが曲を選ぶのを待っています）';
+        renderTracks($('guestTracks'), hostState.tracks, hostState.index);
+        if (!unlocked && url) $('unlockBtn').disabled = false;
+        tick();
+      }
+    }
+
+    function expectedPos() {
+      const s = hostState;
+      if (!s.playing) return s.pos;
+      return s.pos + (Date.now() + offset - s.at) / 1000;
+    }
+
+    $('unlockBtn').onclick = () => {
+      unlocked = true;
+      $('unlockBtn').hidden = true;
+      // ユーザー操作の中で一度再生してブラウザの自動再生制限を解除する
+      if (hostState && hostState.playing) {
+        audio.currentTime = Math.max(0, expectedPos() + lead);
+        lastSeek = Date.now(); pendingCheck = true;
+        audio.play().catch(() => {});
+      } else {
+        audio.play().then(() => audio.pause()).catch(() => {});
+      }
+    };
+
+    function tick() {
+      if (!hostState || !loadedUrl) return;
+      const exp = expectedPos();
+      const now = Date.now();
+      $('guestTime').textContent = fmt(audio.currentTime) + ' / ' + fmt(audio.duration);
+      if (!unlocked) { $('guestDrift').textContent = '「聴き始める」を押してください'; return; }
+
+      if (!hostState.playing) {
+        if (!audio.paused) audio.pause();
+        if (!audio.seeking && Math.abs(audio.currentTime - exp) > 0.05) audio.currentTime = exp;
+        $('guestDrift').textContent = '一時停止中';
+        return;
+      }
+      if (audio.duration && exp >= audio.duration) return;
+
+      if (audio.paused) {
+        audio.currentTime = Math.max(0, exp + lead);
+        lastSeek = now; pendingCheck = true;
+        audio.play().catch(() => {});
+        return;
+      }
+      const drift = audio.currentTime - exp;
+      $('guestDrift').textContent = 'ズレ: ' + (drift >= 0 ? '+' : '') + Math.round(drift * 1000) + ' ms';
+
+      // シーク後の遅れ具合から先読み量(lead)を学習する
+      if (pendingCheck && now - lastSeek > 1200 && !audio.seeking && audio.readyState >= 3) {
+        lead = Math.min(2, Math.max(0, lead - drift));
+        pendingCheck = false;
+      }
+      if (Math.abs(drift) > SEEK_THRESHOLD && !audio.seeking && now - lastSeek > 2000) {
+        audio.currentTime = Math.max(0, exp + lead);
+        lastSeek = now; pendingCheck = true;
+      }
+    }
+    setInterval(tick, 250);
+
+    audio.addEventListener('error', () => { if (audio.getAttribute('src')) setStatus(audioErrorMsg); });
+
+    peer = new Peer();
+    peer.on('open', connect);
+    peer.on('error', e => {
+      if (e.type === 'peer-unavailable') scheduleRetry('部屋が見つかりません（ホストが未接続の可能性）。再試行中…');
+      else if (e.type === 'network' || e.type === 'server-error' || e.type === 'socket-error') scheduleRetry('ネットワークエラー。再試行中…');
+      else setStatus('エラー: ' + e.type);
+    });
+  }
+
+  // ================= 起動 =================
+  if (typeof Peer === 'undefined') {
+    setStatus('通信ライブラリを読み込めませんでした。ページを再読み込みしてください。');
+    return;
+  }
+  const hostRoom = cleanRoom(params.get('host'));
+  const guestRoom = cleanRoom(params.get('room'));
+  if (hostRoom) startHost(hostRoom);
+  else if (guestRoom) startGuest(guestRoom);
+  else {
+    show('startView');
+    $('createBtn').onclick = () => startHost(randomRoom());
+    $('joinBtn').onclick = () => { const r = cleanRoom($('joinCode').value); if (r) startGuest(r); };
+  }
+})();
+</script>
+</body>
+</html>
