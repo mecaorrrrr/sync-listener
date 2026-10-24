@@ -109,6 +109,9 @@
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 (() => {
+  // Google Drive API キー（Drive API を有効化し、HTTPリファラーを自分のPagesに制限したもの）
+  // 空のままだと従来の uc?export=download 形式を使う
+  const DRIVE_API_KEY = 'AIzaSyB5zQWzgjs7Rox_KGkHdO26yMaBVBuHego';
   const PREFIX = 'sync-listen-v1-';
   const SEEK_THRESHOLD = 0.2;   // これ以上ずれたら再シーク(秒)
   const $ = id => document.getElementById(id);
@@ -136,7 +139,11 @@
     url = url.trim();
     if (/google\.com/.test(url)) {
       const m = url.match(/\/file\/d\/([\w-]+)/) || url.match(/[?&]id=([\w-]+)/);
-      if (m) return 'https://drive.google.com/uc?export=download&id=' + m[1];
+      if (m) {
+        if (DRIVE_API_KEY)
+          return 'https://www.googleapis.com/drive/v3/files/' + m[1] + '?alt=media&key=' + DRIVE_API_KEY;
+        return 'https://drive.google.com/uc?export=download&id=' + m[1];
+      }
     }
     return url;
   }
